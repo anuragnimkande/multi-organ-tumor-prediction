@@ -1,0 +1,200 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ──────────────────────────────────────────────────────────
+   Base resets & dark-mode defaults
+   ────────────────────────────────────────────────────────── */
+@layer base {
+  :root {
+    --quantum-blue:  #00d4ff;
+    --quantum-purple:#7c3aed;
+    --bg-base:       #030616;
+    --bg-surface:    #060c2e;
+    --border-quantum: rgba(0, 212, 255, 0.18);
+  }
+
+  * {
+    @apply box-border;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 212, 255, 0.3) transparent;
+  }
+
+  *::-webkit-scrollbar       { width: 6px; }
+  *::-webkit-scrollbar-track  { background: transparent; }
+  *::-webkit-scrollbar-thumb  {
+    background: rgba(0, 212, 255, 0.3);
+    border-radius: 3px;
+  }
+
+  html { @apply scroll-smooth; }
+
+  body {
+    @apply bg-void-950 text-slate-200 font-sans antialiased;
+    background-image: radial-gradient(ellipse at 20% 50%, rgba(124,58,237,0.06) 0%, transparent 50%),
+                      radial-gradient(ellipse at 80% 20%, rgba(0,212,255,0.06) 0%, transparent 50%);
+    min-height: 100vh;
+  }
+
+  h1, h2, h3 { @apply font-display; }
+
+  ::selection {
+    background: rgba(0, 212, 255, 0.25);
+    color: #e2e8f0;
+  }
+}
+
+/* ──────────────────────────────────────────────────────────
+   Component utilities
+   ────────────────────────────────────────────────────────── */
+@layer components {
+
+  /* Glass card */
+  .glass-card {
+    @apply rounded-2xl border border-quantum-500/20
+           backdrop-blur-md bg-white/[0.03]
+           shadow-quantum;
+  }
+
+  /* Quantum gradient border */
+  .quantum-border {
+    position: relative;
+  }
+  .quantum-border::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(135deg, #7c3aed, #00d4ff);
+    -webkit-mask: linear-gradient(#fff 0 0) content-box,
+                  linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+    -webkit-mask-composite: xor;
+    pointer-events: none;
+  }
+
+  /* Primary button */
+  .btn-quantum {
+    @apply relative inline-flex items-center gap-2 px-6 py-3 rounded-xl
+           font-semibold text-white transition-all duration-300
+           hover:scale-105 active:scale-95 cursor-pointer;
+    background: linear-gradient(135deg, #7c3aed 0%, #00d4ff 100%);
+    box-shadow: 0 4px 24px rgba(124, 58, 237, 0.35);
+  }
+  .btn-quantum:hover {
+    box-shadow: 0 6px 32px rgba(0, 212, 255, 0.45);
+  }
+
+  /* Secondary/outline button */
+  .btn-outline {
+    @apply relative inline-flex items-center gap-2 px-6 py-3 rounded-xl
+           font-semibold text-quantum-500 border border-quantum-500/40
+           bg-transparent transition-all duration-300
+           hover:bg-quantum-500/10 hover:border-quantum-500
+           active:scale-95 cursor-pointer;
+  }
+
+  /* Badge */
+  .badge-tumor {
+    @apply inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full
+           text-sm font-semibold text-white
+           bg-tumor/20 border border-tumor/50;
+    box-shadow: 0 0 20px rgba(239,68,68,0.3);
+  }
+  .badge-healthy {
+    @apply inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full
+           text-sm font-semibold text-white
+           bg-healthy/20 border border-healthy/50;
+    box-shadow: 0 0 20px rgba(16,185,129,0.3);
+  }
+
+  /* Metric card */
+  .metric-card {
+    @apply glass-card p-4 flex flex-col gap-1;
+  }
+
+  /* Input */
+  .input-quantum {
+    @apply w-full bg-white/5 border border-quantum-500/20 rounded-xl px-4 py-3
+           text-slate-200 placeholder-slate-500
+           focus:outline-none focus:border-quantum-500/60 focus:bg-white/8
+           transition-all duration-200;
+  }
+}
+
+/* ──────────────────────────────────────────────────────────
+   Quantum particle background (Canvas is in React, these
+   are CSS-only fallback particles)
+   ────────────────────────────────────────────────────────── */
+.particle {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  animation: float 6s ease-in-out infinite;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Scanner line animation (used in Loading component)
+   ────────────────────────────────────────────────────────── */
+.scanner-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #00d4ff, transparent);
+  box-shadow: 0 0 12px #00d4ff;
+  animation: scan 2.5s ease-in-out infinite;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Progress bar (confidence meter)
+   ────────────────────────────────────────────────────────── */
+.confidence-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #7c3aed, #00d4ff);
+  transition: width 0.8s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: 0 0 8px rgba(0, 212, 255, 0.5);
+}
+
+/* ──────────────────────────────────────────────────────────
+   Qubit orbit animation
+   ────────────────────────────────────────────────────────── */
+@keyframes orbit {
+  from { transform: rotate(0deg) translateX(40px) rotate(0deg); }
+  to   { transform: rotate(360deg) translateX(40px) rotate(-360deg); }
+}
+
+.qubit {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--quantum-blue);
+  box-shadow: 0 0 8px var(--quantum-blue);
+  animation: orbit linear infinite;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Heatmap overlay
+   ────────────────────────────────────────────────────────── */
+.heatmap-overlay {
+  mix-blend-mode: screen;
+  opacity: 0.8;
+  transition: opacity 0.3s ease;
+}
+.heatmap-overlay:hover {
+  opacity: 1;
+}
+
+/* ──────────────────────────────────────────────────────────
+   React hot toast override (dark theme)
+   ────────────────────────────────────────────────────────── */
+.go2072408551 {
+  background: #060c2e !important;
+  color: #e2e8f0 !important;
+  border: 1px solid rgba(0, 212, 255, 0.2) !important;
+}

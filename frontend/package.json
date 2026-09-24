@@ -1,0 +1,29 @@
+{
+  "name": "quantum-multiorgan-ui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hybrid Quantum-Classical Multi-Organ Tumor Detection — React Frontend",
+  "type": "module",
+  "scripts": {
+    "dev":     "vite --port 5173",
+    "build":   "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios":        "^1.7.2",
+    "react":        "^18.3.1",
+    "react-dom":    "^18.3.1",
+    "react-router-dom": "^6.24.0",
+    "react-dropzone": "^14.2.3",
+    "react-hot-toast": "^2.4.1"
+  },
+  "devDependencies": {
+    "@types/react":          "^18.3.3",
+    "@types/react-dom":      "^18.3.0",
+    "@vitejs/plugin-react":  "^4.3.1",
+    "autoprefixer":          "^10.4.19",
+    "postcss":               "^8.4.39",
+    "tailwindcss":           "^3.4.4",
+    "vite":                  "^5.3.3"
+  }
+}
