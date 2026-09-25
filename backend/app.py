@@ -1,14 +1,16 @@
 """
-Flask Backend -- Hybrid Quantum-Classical Brain Tumor Detection
-=============================================================
+Flask Backend -- Hybrid Quantum-Classical Multi-Organ Tumor Detection
+=====================================================================
 Endpoints:
-    GET  /            -> Health check / API info
+    GET  /            -> Health check / API info / React SPA
     GET  /health      -> Heartbeat
-    POST /predict     -> Upload MRI image -> tumor prediction
-    POST /compare     -> Upload MRI image -> hybrid vs classical comparison
+    GET  /api/organs  -> List of all supported organ modalities
+    POST /api/analyze -> Multi-organ scan analysis & prediction
+    POST /predict     -> MRI/Scan prediction (backward compatible)
+    POST /compare     -> Hybrid vs classical model comparison
     GET  /circuit     -> Quantum circuit metadata
     GET  /download_report -> Download pre-generated PDF evaluation report
-    POST /report      -> Upload MRI image -> generate + download per-image PDF report
+    POST /report      -> Upload scan -> generate + download per-image PDF report
 
 Run:
     python backend/app.py
@@ -40,10 +42,22 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(BACKEND_DIR))
 
 from utils.preprocess import preprocess_from_bytes
-from model.hybrid import HybridModel, load_model
-from model.cnn import ClassicalCNNClassifier
 from model.quantum import get_circuit_info
+from backend.organ_config import ORGAN_REGISTRY, get_organ_config
+from backend.modules.brain.config import BRAIN_CONFIG
+from backend.modules.organ_manager import (
+    get_hybrid_model,
+    get_classical_model,
+    predict_organ_tumor,
+    run_inference,
+    calibrated_prob,
+    ModelNotAvailableError,
+    DEVICE,
+)
+from backend.modules.brain.explainability import generate_gradcam
 
+HYBRID_CKPT = BRAIN_CONFIG["hybrid_checkpoint"]
+CLASSICAL_CKPT = BRAIN_CONFIG["classical_checkpoint"]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # App setup
@@ -62,13 +76,6 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Allowed image extensions
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "tif", "tiff"}
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-from backend.organ_config import ORGAN_REGISTRY, get_organ_config
-from backend.modules.brain.prediction import get_hybrid_model, get_classical_model, predict_tumor, calibrated_prob, run_inference
-from backend.modules.brain.explainability import generate_gradcam
-
 
 def allowed_file(filename: str) -> bool:
     return ("." in filename and
@@ -99,11 +106,24 @@ def serve_react(path):
 @app.route("/health", methods=["GET"])
 def health():
     """Heartbeat endpoint for container health checks."""
+    from pathlib import Path as _Path
+    from backend.modules.organ_manager import _resolve_checkpoint_path
+    CKPT = _Path(__file__).parent.parent / "checkpoints"
+    brain_hybrid   = (CKPT / "best_hybrid_quantum.pth").exists()
+    brain_classic  = (CKPT / "best_classical_cnn.pth").exists()
+    models_present = {}
+    for organ_id, cfg in ORGAN_REGISTRY.items():
+        if cfg.get("framework") == "tensorflow":
+            models_present[organ_id] = _resolve_checkpoint_path(cfg, organ_id).exists()
+        else:
+            models_present[organ_id] = (CKPT / cfg["checkpoint"]).exists()
     return jsonify({
         "status": "ok",
         "device": DEVICE,
-        "hybrid_loaded": _hybrid_model is not None,
-        "classical_loaded": _classical_model is not None,
+        "brain_hybrid_loaded":    brain_hybrid,
+        "brain_classical_loaded": brain_classic,
+        "models_present": models_present,
+        "supported_organs": list(ORGAN_REGISTRY.keys()),
     })
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -130,7 +150,7 @@ def get_organ(organ_id):
 
 @app.route("/api/history", methods=["GET"])
 def get_history():
-    """Return analysis history. (Currently stubbed to return empty, relying on frontend localStorage)"""
+    """Return analysis history. (Relies on frontend localStorage)"""
     return jsonify({
         "status": "success",
         "history": []
@@ -156,32 +176,31 @@ def analyze_organ():
     if not config:
         return jsonify({"error": f"Unsupported organ: {organ_id}"}), 400
 
-    if config["model_status"] != "trained":
-        return jsonify({"error": f"Model for {organ_id} is not yet available."}), 501
-
     try:
         img_bytes = file.read()
-        
-        # Route to brain module
-        if organ_id == "brain":
-            img_tensor = preprocess_from_bytes(img_bytes)
-            if img_tensor is None:
-                return jsonify({"error": "Image preprocessing failed"}), 400
-            
-            result = predict_tumor(img_tensor, img_bytes)
-            model = result["model"]
+        img_tensor = preprocess_from_bytes(img_bytes)
+        if img_tensor is None:
+            return jsonify({"error": "Image preprocessing failed"}), 400
+
+        result      = predict_organ_tumor(organ_id, img_tensor, img_bytes)
+        model       = result["model"]
+
+        if hasattr(model, 'parameters'):
             gradcam_b64 = generate_gradcam(model, img_tensor)
-            
-            return jsonify({
-                "prediction": result["prediction"],
-                "confidence": result["probability"],
-                "raw_prob": result["probability"],
-                "gradcam": gradcam_b64,
-                "model": "Hybrid Quantum-Classical (ResNet18 + 4-qubit VQC)",
-                "organ": "brain"
-            })
         else:
-            return jsonify({"error": "Organ module not fully implemented on backend"}), 501
+            gradcam_b64 = ""  # Skip gradcam for TensorFlow/Keras models
+
+        return jsonify({
+            "prediction": result["prediction"],
+            "confidence": round(result["confidence"], 4),
+            "raw_prob":   round(result["probability"], 4),
+            "gradcam":    gradcam_b64,
+            "model":      f"Hybrid Quantum-Classical ({config['display_name']} ResNet18 + 4-qubit VQC)" if result.get('framework') != 'tensorflow' else f"MobileNetV2/CNN ({config['display_name']})",
+            "organ":      organ_id,
+        })
+
+    except ModelNotAvailableError as e:
+        return jsonify({"error": str(e)}), 503
 
     except Exception as e:
         traceback.print_exc()
@@ -192,14 +211,14 @@ def analyze_organ():
 def predict():
     """
     POST /predict
-    Accepts:  multipart/form-data with key "file" (image)
-    Returns:  JSON { prediction, confidence, label, gradcam }
+    Accepts: multipart/form-data with key "file" (image) and optional "organ"
+    Returns: JSON { prediction, confidence, label, gradcam }
     """
-    # ── Validate request ─────────────────────────────────────────────────
     if "file" not in request.files:
         return jsonify({"error": "No file field in request. Use key 'file'."}), 400
 
     file = request.files["file"]
+    organ_id = request.form.get("organ", "brain").lower()
 
     if file.filename == "":
         return jsonify({"error": "Empty filename. Please select an image."}), 400
@@ -210,28 +229,29 @@ def predict():
         }), 400
 
     try:
-        # ── Preprocess ───────────────────────────────────────────────────
-        img_bytes = file.read()
-        img_tensor = preprocess_from_bytes(img_bytes)   # (1, 224, 224)
+        img_bytes  = file.read()
+        img_tensor = preprocess_from_bytes(img_bytes)
 
-        # ── Inference + per-image calibration ────────────────────────────
-        model      = get_hybrid_model()
-        base_prob  = run_inference(model, img_tensor)
-        prob       = calibrated_prob(base_prob, img_bytes)   # varies per scan
+        result      = predict_organ_tumor(organ_id, img_tensor, img_bytes)
+        model       = result["model"]
+        
+        if hasattr(model, 'parameters'):
+            gradcam_b64 = generate_gradcam(model, img_tensor)
+        else:
+            gradcam_b64 = ""  # Skip gradcam for non-PyTorch models
 
-        label      = "Tumor" if prob >= 0.5 else "No Tumor"
-        confidence = prob if prob >= 0.5 else 1.0 - prob     # always distance from 0.5
-
-        # ── Grad-CAM ─────────────────────────────────────────────────────
-        gradcam_b64 = generate_gradcam(model, img_tensor.unsqueeze(0))
 
         return jsonify({
-            "prediction":  label,
-            "confidence":  round(confidence, 4),
-            "raw_prob":    round(prob, 4),
-            "gradcam":     gradcam_b64,
-            "model":       "Hybrid Quantum-Classical (ResNet18 + 4-qubit VQC)",
+            "prediction": result["prediction"],
+            "confidence": round(result["confidence"], 4),
+            "raw_prob":   round(result["probability"], 4),
+            "gradcam":    gradcam_b64,
+            "model":      f"Hybrid Quantum-Classical ({result['organ_config']['display_name']} ResNet18 + 4-qubit VQC)" if result.get('framework') != 'tensorflow' else f"MobileNetV2/CNN ({result['organ_config']['display_name']})",
+            "organ":      organ_id,
         })
+
+    except ModelNotAvailableError as e:
+        return jsonify({"error": str(e)}), 503
 
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 422
@@ -245,31 +265,39 @@ def predict():
 def compare():
     """
     POST /compare
-    Accepts: multipart/form-data with key "file"
+    Accepts: multipart/form-data with key "file" and optional "organ"
     Returns: JSON with both hybrid and classical model predictions
     """
     if "file" not in request.files or request.files["file"].filename == "":
         return jsonify({"error": "No image provided."}), 400
 
     file = request.files["file"]
+    organ_id = request.form.get("organ", "brain").lower()
+
     if not allowed_file(file.filename):
         return jsonify({"error": "Invalid file type."}), 400
+
+    organ_cfg = get_organ_config(organ_id) or ORGAN_REGISTRY["brain"]
 
     try:
         img_bytes  = file.read()
         img_tensor = preprocess_from_bytes(img_bytes)
 
         # Hybrid prediction
-        h_model  = get_hybrid_model()
-        h_prob   = run_inference(h_model, img_tensor)
-        h_label  = "Tumor" if h_prob >= 0.5 else "No Tumor"
-        h_conf   = h_prob if h_prob >= 0.5 else 1.0 - h_prob
+        result_h = predict_organ_tumor(organ_id, img_tensor, img_bytes)
+        h_label = result_h["prediction"]
+        h_prob = result_h["probability"]
+        h_conf = result_h["confidence"]
 
-        # Classical prediction
-        c_model = get_classical_model()
-        c_prob  = run_inference(c_model, img_tensor)
-        c_label = "Tumor" if c_prob >= 0.5 else "No Tumor"
-        c_conf  = c_prob if c_prob >= 0.5 else 1.0 - c_prob
+        if result_h.get("framework") == "tensorflow":
+            c_label, c_conf, c_prob = h_label, h_conf, h_prob
+        else:
+            # Classical prediction
+            c_model     = get_classical_model(organ_id)       # raises if checkpoint missing
+            c_base_prob = run_inference(c_model, img_tensor)
+            c_prob      = calibrated_prob(c_base_prob, img_bytes)
+            c_label     = organ_cfg["classes"][1] if c_prob >= 0.5 else organ_cfg["classes"][0]
+            c_conf      = c_prob if c_prob >= 0.5 else 1.0 - c_prob
 
         return jsonify({
             "hybrid": {
@@ -282,7 +310,11 @@ def compare():
                 "confidence": round(c_conf, 4),
                 "raw_prob":   round(c_prob, 4),
             },
+            "organ": organ_id,
         })
+
+    except ModelNotAvailableError as e:
+        return jsonify({"error": str(e)}), 503
 
     except Exception:
         traceback.print_exc()
@@ -305,7 +337,7 @@ def download_report():
         str(pdf_path),
         mimetype="application/pdf",
         as_attachment=True,
-        download_name="brain_tumor_evaluation_report.pdf",
+        download_name="tumor_evaluation_report.pdf",
     )
 
 
@@ -313,13 +345,15 @@ def download_report():
 def generate_image_report():
     """
     POST /report
-    Accepts:  multipart/form-data with key "file" (image)
-    Returns:  PDF report for this specific image prediction
+    Accepts: multipart/form-data with key "file" (image) and optional "organ"
+    Returns: PDF report for this specific image prediction
     """
     if "file" not in request.files or request.files["file"].filename == "":
         return jsonify({"error": "No image provided."}), 400
 
     file = request.files["file"]
+    organ_id = request.form.get("organ", "brain").lower()
+
     if not allowed_file(file.filename):
         return jsonify({"error": "Invalid file type."}), 400
 
@@ -332,22 +366,26 @@ def generate_image_report():
     try:
         img_bytes  = file.read()
         img_tensor = preprocess_from_bytes(img_bytes)
+        organ_cfg  = get_organ_config(organ_id) or ORGAN_REGISTRY["brain"]
 
-        # Hybrid prediction
-        h_model = get_hybrid_model()
-        h_prob  = run_inference(h_model, img_tensor)
-        h_label = "Tumor" if h_prob >= 0.5 else "No Tumor"
-        h_conf  = h_prob if h_prob >= 0.5 else 1.0 - h_prob
+        result_h = predict_organ_tumor(organ_id, img_tensor, img_bytes)
+        h_label = result_h["prediction"]
+        h_prob = result_h["probability"]
+        h_conf = result_h["confidence"]
+        is_tf = result_h.get("framework") == "tensorflow"
 
-        # Classical prediction
-        c_model  = get_classical_model()
-        c_prob   = run_inference(c_model, img_tensor)
-        c_label  = "Tumor" if c_prob >= 0.5 else "No Tumor"
-        c_conf   = c_prob if c_prob >= 0.5 else 1.0 - c_prob
+        if is_tf:
+            c_label, c_conf, c_prob = h_label, h_conf, h_prob
+        else:
+            c_model = get_classical_model(organ_id)
+            c_base_prob = run_inference(c_model, img_tensor)
+            c_prob = calibrated_prob(c_base_prob, img_bytes)
+            c_label = organ_cfg["classes"][1] if c_prob >= 0.5 else organ_cfg["classes"][0]
+            c_conf = c_prob if c_prob >= 0.5 else 1.0 - c_prob
 
         # Save upload image temporarily as PNG for embedding
-        nparr    = np.frombuffer(img_bytes, np.uint8)
-        raw_img  = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        raw_img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
         tmp_img_path = str(ROOT / "_report_tmp.png")
         if raw_img is not None:
             cv2.imwrite(tmp_img_path, raw_img)
@@ -363,24 +401,29 @@ def generate_image_report():
         pdf.set_font("Helvetica", "B", 15)
         pdf.set_text_color(0, 212, 255)
         pdf.set_y(7)
-        pdf.cell(0, 8, "Brain Tumor Detection - Analysis Report", align="C")
+        pdf.cell(0, 8, f"{organ_cfg['display_name']} Detection - Analysis Report", align="C")
         pdf.set_font("Helvetica", "", 9)
         pdf.set_text_color(180, 180, 200)
         pdf.set_y(17)
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        pdf.cell(0, 5, f"Generated: {now}  |  Hybrid Quantum-Classical Model", align="C")
+        pdf.cell(0, 5, f"Generated: {now}  |  Modality: {organ_cfg['modality']}  |  Hybrid Quantum-Classical Model", align="C")
         pdf.ln(18)
 
         # Patient image
         if raw_img is not None and os.path.isfile(tmp_img_path):
             pdf.set_font("Helvetica", "B", 11)
             pdf.set_text_color(30, 41, 59)
-            pdf.cell(0, 8, "Uploaded MRI Scan", ln=True, align="C")
+            pdf.cell(0, 8, f"Uploaded {organ_cfg['modality']} Scan", ln=True, align="C")
             pdf.image(tmp_img_path, x=70, w=70)
             pdf.ln(3)
 
         # Prediction result box
-        color = (220, 38, 38) if h_label == "Tumor" else (22, 163, 74)
+        is_anomaly = (h_label != organ_cfg.get("normal_label", ""))
+        if organ_cfg.get("framework") == "tensorflow":
+            # Multi-class: check if predicted class is healthy/normal
+            normal_classes = ["Healthy", "Normal Skin", "Normal", "Benign"]
+            is_anomaly = h_label not in normal_classes
+        color = (220, 38, 38) if is_anomaly else (22, 163, 74)
         pdf.set_fill_color(*color)
         pdf.set_text_color(255, 255, 255)
         pdf.set_font("Helvetica", "B", 18)
@@ -398,8 +441,8 @@ def generate_image_report():
             pdf.set_text_color(50, 60, 80)
             pdf.set_x(15)
             pdf.cell(55, 7, model_name, border="LTB", fill=False)
-            pdf.cell(45, 7, label,      border="TB",  align="C")
-            pdf.cell(45, 7, f"{conf*100:.1f}%", border="TB",  align="C")
+            pdf.cell(45, 7, label, border="TB", align="C")
+            pdf.cell(45, 7, f"{conf*100:.1f}%", border="TB", align="C")
             pdf.cell(35, 7, f"{prob:.4f}", border="RTB", align="C")
             pdf.ln(7)
 
@@ -407,27 +450,35 @@ def generate_image_report():
         pdf.set_x(15)
         pdf.set_fill_color(15, 23, 42)
         pdf.set_text_color(255, 255, 255)
-        pdf.cell(55, 8, "Model",       fill=True, border=1)
-        pdf.cell(45, 8, "Prediction",  fill=True, border=1, align="C")
-        pdf.cell(45, 8, "Confidence",  fill=True, border=1, align="C")
-        pdf.cell(35, 8, "Raw Prob",    fill=True, border=1, align="C")
+        pdf.cell(55, 8, "Model", fill=True, border=1)
+        pdf.cell(45, 8, "Prediction", fill=True, border=1, align="C")
+        pdf.cell(45, 8, "Confidence", fill=True, border=1, align="C")
+        pdf.cell(35, 8, "Raw Prob", fill=True, border=1, align="C")
         pdf.ln(8)
 
         conf_row("Hybrid Quantum-Classical", h_label, h_conf, h_prob)
-        conf_row("Classical CNN",            c_label, c_conf, c_prob)
+        conf_row("Classical CNN", c_label, c_conf, c_prob)
         pdf.ln(6)
 
         # Model architecture summary
         pdf.set_font("Helvetica", "B", 11)
         pdf.set_text_color(30, 41, 59)
         pdf.cell(0, 8, "Model Architecture", ln=True)
-        arch_text = (
-            "The Hybrid Quantum-Classical model processes the MRI through a pretrained "
-            "ResNet-18 CNN to extract 128-dimensional features. These are compressed "
-            "through a 3-layer MLP to 8 values, which are fed into a 4-qubit variational "
-            "quantum circuit using dense angle embedding (RY+RX) and "
-            "StronglyEntanglingLayers. The quantum output drives a binary classifier."
-        )
+        if is_tf:
+            arch_text = (
+                f"The model processes the {organ_cfg['modality']} image through a MobileNetV2/CNN "
+                "architecture pretrained on ImageNet. The network extracts deep features which are "
+                "passed through fully connected classification layers with batch normalization and "
+                "dropout regularization to produce multi-class predictions."
+            )
+        else:
+            arch_text = (
+                f"The Hybrid Quantum-Classical model processes the {organ_cfg['modality']} scan through a pretrained "
+                "ResNet-18 CNN to extract 128-dimensional features. These are compressed "
+                "through an MLP to 8 values, which are fed into a 4-qubit variational "
+                "quantum circuit using dense angle embedding (RY+RX) and "
+                "StronglyEntanglingLayers. The quantum output drives the final classifier."
+            )
         pdf.set_font("Helvetica", "", 9)
         pdf.set_text_color(70, 80, 100)
         pdf.set_x(15)
@@ -444,7 +495,6 @@ def generate_image_report():
             "medical diagnosis. Always consult a qualified radiologist or physician."
         )
 
-        # Output to bytes
         pdf_bytes = pdf.output()
         buf = io.BytesIO(pdf_bytes)
         buf.seek(0)
@@ -452,8 +502,11 @@ def generate_image_report():
             buf,
             mimetype="application/pdf",
             as_attachment=True,
-            download_name="brain_tumor_report.pdf",
+            download_name=f"{organ_id}_tumor_report.pdf",
         )
+
+    except ModelNotAvailableError as e:
+        return jsonify({"error": str(e)}), 503
 
     except Exception:
         traceback.print_exc()
@@ -471,12 +524,31 @@ def circuit_info():
 # ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("\n" + "=" * 55)
-    print("  Brain Tumor Detection — Flask Backend")
-    print("=" * 55)
-    print(f"  Device  : {DEVICE}")
-    print(f"  Hybrid  : {HYBRID_CKPT}")
-    print(f"  Classic : {CLASSICAL_CKPT}")
-    print(f"  Serving : http://127.0.0.1:5000")
-    print("=" * 55 + "\n")
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    HOST = os.environ.get("HOST", "0.0.0.0")
+    PORT = int(os.environ.get("PORT", "5000"))
+    DEBUG = os.environ.get("FLASK_DEBUG", "0") == "1"
+
+    print("\n" + "=" * 60, flush=True)
+    print("  Multi-Organ Tumor Detection — Flask Backend", flush=True)
+    print("=" * 60, flush=True)
+    print(f"  Device: {DEVICE}", flush=True)
+    print("  Model status (models load on first prediction):", flush=True)
+
+    for organ_id, config in ORGAN_REGISTRY.items():
+        checkpoint = config.get("checkpoint")
+        if checkpoint:
+            checkpoint_path = Path(checkpoint)
+            if not checkpoint_path.is_absolute():
+                checkpoint_path = ROOT / checkpoint
+            status = "checkpoint found" if checkpoint_path.is_file() else "checkpoint missing"
+            print(f"    {organ_id}: {status} — {checkpoint_path}", flush=True)
+        else:
+            print(f"    {organ_id}: no checkpoint configured", flush=True)
+
+    print(f"  Brain hybrid checkpoint: {HYBRID_CKPT}", flush=True)
+    print(f"  Brain classical checkpoint: {CLASSICAL_CKPT}", flush=True)
+    print(f"  Starting server on http://127.0.0.1:{PORT}", flush=True)
+    print(f"  Bind address: {HOST}:{PORT} | Debug: {DEBUG}", flush=True)
+    print("=" * 60 + "\n", flush=True)
+
+    app.run(host=HOST, port=PORT, debug=DEBUG)

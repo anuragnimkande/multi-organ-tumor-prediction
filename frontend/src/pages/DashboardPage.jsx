@@ -47,7 +47,7 @@ const DashboardPage = () => {
         </div>
         <div className="metric-card">
           <span className="text-sm font-medium text-slate-400">Active Models</span>
-          <span className="text-3xl font-bold text-emerald-400">1 (Brain MRI)</span>
+          <span className="text-3xl font-bold text-emerald-400">5 (Multi-Organ)</span>
         </div>
       </div>
 
